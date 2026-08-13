@@ -166,6 +166,13 @@
       "sha256": "fefc6a4c1b8bd426dfad4aa4c3d66a4de836d1172708501d5ef4d828efae8d2d"
     },
     {
+      "source": "INSTALLATION.md",
+      "target": "forager/INSTALLATION.md",
+      "kind": "payload",
+      "mode": "0644",
+      "sha256": "e045092c4404c94e5b1a5021e952c00dc8d5f67357ecf80dccc2e248389e34cf"
+    },
+    {
       "source": "NOTICE.md",
       "target": "forager/NOTICE.md",
       "kind": "license-notice",
