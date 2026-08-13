@@ -1,0 +1,27 @@
+FROM debian@sha256:58ce6f1271ae1c8a2006ff7d3e54e9874d839f573d8009c20154ad0f2fb0a225
+
+RUN printf '%s\n' \
+      'deb http://archive.debian.org/debian buster main' \
+      'deb http://archive.debian.org/debian-security buster/updates main' \
+      > /etc/apt/sources.list \
+ && printf '%s\n' 'Acquire::Check-Valid-Until "false";' \
+      > /etc/apt/apt.conf.d/99no-check-valid \
+ && dpkg --add-architecture armhf \
+ && apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      binutils-arm-linux-gnueabihf \
+      clang-11 \
+      file \
+      g++-arm-linux-gnueabihf \
+      git \
+      libc6-dev-armhf-cross \
+      libclang-11-dev \
+      libsdl2-dev:armhf \
+      make \
+      pkg-config \
+      python3 \
+      python3-clang-11 \
+      zlib1g-dev:armhf \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src

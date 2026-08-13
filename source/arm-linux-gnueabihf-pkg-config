@@ -1,0 +1,8 @@
+#!/bin/sh
+case "$*" in
+    "sdl2 --cflags") printf '%s\n' '-I/usr/include/SDL2 -D_REENTRANT' ;;
+    "sdl2 --libs") printf '%s\n' '-L/usr/lib/arm-linux-gnueabihf -lSDL2' ;;
+    "zlib --cflags") printf '%s\n' '-I/usr/include' ;;
+    "zlib --libs") printf '%s\n' '/usr/lib/arm-linux-gnueabihf/libz.a' ;;
+    *) printf '%s\n' "unsupported pkg-config request: $*" >&2; exit 2 ;;
+esac

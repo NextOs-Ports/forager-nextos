@@ -1,0 +1,51 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  release-inputs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax and metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n Forager.sh port-env.sh prepare.sh build.sh \
+            source/build-release.sh package/build-portmaster-package.sh \
+            nxextract/run-extractor.sh nxextract/nxextract-runtime-env.sh
+          python3 -m py_compile tools/build_forager_port.py nxextract/nxextract.py
+          while IFS= read -r file; do
+            python3 -m json.tool "$file" >/dev/null
+          done < <(find . -type f -name '*.json' -print | sort)
+      - name: Frozen loader and ABI
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected=2f7fe91d188070a5b61e282ae085c7251110471165bd71ae78252ff90b5e9353
+          [[ $(sha256sum forager-nextos | cut -d' ' -f1) == "$expected" ]]
+          readelf -h forager-nextos | grep -q 'Machine:.*ARM'
+          readelf -l forager-nextos | grep -q '/lib/ld-linux-armhf.so.3'
+          ! readelf -d forager-nextos | grep -Eq 'RPATH|RUNPATH'
+          newest=$(readelf --version-info forager-nextos |
+            grep -oE 'GLIBC_[0-9]+([.][0-9]+)*' |
+            sed 's/^GLIBC_//' | sort -Vu | tail -1)
+          [[ $(printf '%s\n%s\n' 2.28 "$newest" | sort -V | tail -1) == 2.28 ]]
+      - name: Public-package boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          ! grep -ERn '(^|[;&|[:space:]])stat[[:space:]]+-' \
+            Forager.sh port-env.sh prepare.sh nxextract/*.sh
+          ! find . -type f \( -name '*.apk' -o -name '*.apkm' -o \
+            -name '*.apks' -o -name '*.xapk' -o -name '*.obb' -o \
+            -name '*.sav' -o -name '*.rgba' -o -name '*.raw' -o \
+            -name '*.log' \) -print -quit | grep .
+          ! grep -ERn '192[.]168[.]|/home/felipe|/mnt/ARQUIVOS|root@' \
+            --include='*.sh' --include='*.py' --include='*.md' \
+            --include='*.txt' --include='*.json' .

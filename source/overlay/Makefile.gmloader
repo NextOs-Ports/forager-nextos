@@ -1,0 +1,130 @@
+ARCH ?= aarch64-linux-gnu
+CROSS ?= ${ARCH}-
+CC := ${CROSS}gcc
+CXX := ${CROSS}g++
+LD := ${CROSS}ld
+PKG_CONFIG := ${CROSS}pkg-config
+STATIC_LIBSTDCXX ?= 0
+
+BUILD_DATE = $(shell date +"%Y%m%d_%H%M%S")
+GIT_BRANCH = ${GITHUB_REF_NAME}
+GIT_BRANCH_FRIENDLY = $(subst -,_,$(GIT_BRANCH))
+
+DEVICE_ARCH = aarch64
+
+ifeq ($(ARCH), arm-linux-gnueabihf)
+	DEVICE_ARCH = armhf
+endif
+
+LIBS:=\
+	-pthread \
+	-lm \
+	-lrt \
+	-ldl \
+	$(shell ${PKG_CONFIG} sdl2 --libs) \
+	$(shell ${PKG_CONFIG} zlib --libs) \
+	-lstdc++fs
+
+# General compilation flags
+OPTM?=-O2 -ggdb
+COMMONFLAGS:=-Wno-strict-aliasing -Werror=return-type -I. -I./thunks/ -I./loader/ -I./gmloader/ -I./build/${ARCH}/thunks/libc -I./jni/ -I./3rdparty/json/include -I./3rdparty/stb -I./3rdparty/lua -I./3rdparty/libzip/lib -I./3rdparty/libzip-config -include 3rdparty/libzip-config/libzip.${ARCH}.h ${OPTM} -MMD
+CFLAGS:=$(shell ${PKG_CONFIG} sdl2 --cflags) ${COMMONFLAGS}
+CXXFLAGS:=-std=gnu++2a -fuse-cxa-atexit $(shell ${PKG_CONFIG} sdl2 --cflags) ${COMMONFLAGS}
+LDFLAGS:=${OPTM} -no-pie -Wl,--allow-shlib-undefined -Wl,--gc-sections -Wl,--defsym,BUILD_DATE_$(BUILD_DATE)=0 -Wl,--defsym,GIT_HASH_$(GITHUB_SHA)=0 -Wl,--defsym,GIT_BRANCH_$(GIT_BRANCH_FRIENDLY)=0
+
+# General pre-processing flags
+LLVM_FILE?=
+LLVM_INC?=/usr/${ARCH}/include
+LLVM_SYSROOT?=
+
+GENERATE?=
+
+ifneq (${LLVM_SYSROOT},)
+	GENERATE+=--llvm-sysroot="${LLVM_SYSROOT}"
+endif
+
+ifneq (${LLVM_FILE},)
+	GENERATE+=--llvm-library-file="${LLVM_FILE}"
+endif
+
+GENERATE+=--llvm-includes ${LLVM_INC}
+
+ifeq (${DEVICE_ARCH},aarch64)
+	FMOD_ARCH=arm64
+else ifeq (${DEVICE_ARCH},armhf)
+	FMOD_ARCH=armhf
+endif
+
+ifeq (${USE_FMOD},1)
+	CFLAGS+=-DUSE_FMOD=1 -I./3rdparty/fmod/api/core/inc -I./3rdparty/fmod/api/studio/inc
+	CXXFLAGS+=-DUSE_FMOD=1 -I./3rdparty/fmod/api/core/inc -I./3rdparty/fmod/api/studio/inc
+
+	LIBS+=-L./3rdparty/fmod/api/core/lib/${FMOD_ARCH} -L./3rdparty/fmod/api/studio/lib/${FMOD_ARCH} -lfmod -lfmodstudio
+	-include 3rdparty/FMOD_SDL.mk
+endif
+
+ifeq (${USE_LUA},1)
+	CFLAGS+=-DUSE_LUA=1
+	-include 3rdparty/lua.mk
+endif
+
+ifeq (${VIDEO_SUPPORT},1)
+	CFLAGS+=-DVIDEO_SUPPORT=1 -I./3rdparty/SDL_kitchensink/include
+	LIBS+=-lavcodec -lavformat -lswresample -lswscale -lavutil
+	-include 3rdparty/SDL_kitchensink.mk
+endif
+
+ifeq (${STATIC_LIBSTDCXX},1)
+	LIBS+=-static-libstdc++
+endif
+
+# Used by generate_libc.py to generate the function tables that are exported to the
+# application.
+LIBC_SRCS=$(filter-out $(if ${exclude_file1},,thunks/libc/libc_table.cpp),$(wildcard thunks/libc/*.cpp))
+LIBC_TABS=build/${ARCH}/thunks/libc/impl_header.h build/${ARCH}/thunks/libc/impl_tab.h
+
+# Files that are compiled into your loader
+LOADER_OBJS=$(patsubst %.cpp,build/%.cpp.o,$(wildcard loader/*.cpp))
+THUNK_OBJS=$(patsubst %.cpp,build/%.cpp.o,$(wildcard thunks/*/*.cpp))
+JNI_OBJS:=$(patsubst %.cpp,build/%.cpp.o,$(wildcard jni/classes/*.cpp))
+JNI_OBJS+=$(patsubst %.cpp,build/%.cpp.o,$(wildcard jni/*.cpp))
+GMLOADER_OBJS:=$(patsubst %.cpp,build/%.cpp.o,$(wildcard gmloader/*.cpp))
+GMLOADER_OBJS+=$(patsubst %.cpp,build/%.cpp.o,$(wildcard gmloader/classes/*.cpp))
+GMLOADER_OBJS+=$(patsubst %.cpp,build/%.cpp.o,$(wildcard gmloader/stubs/*.cpp))
+
+GENERIC_OBJ:=\
+	${LOADER_OBJS} \
+	${THUNK_OBJS} \
+	${JNI_OBJS} \
+	${GMLOADER_OBJS}
+
+OBJ=$(patsubst build/%,build/${ARCH}/%,${GENERIC_OBJ})
+
+all: build/${ARCH}/gmloader/gmloadernext.${DEVICE_ARCH}
+
+clean:
+	rm -rf build/${ARCH}
+
+# Include subprojects for 3rdparty libraries and their relevant flags
+-include 3rdparty/libbsd.mk
+-include 3rdparty/libzip.mk
+
+# By repeating the generated headers on this rule, we force them to start building
+# as soon as possible, so libc_table.cpp isn't waiting forever.
+build/${ARCH}/gmloader/gmloadernext.${DEVICE_ARCH}: ${LIBC_TABS} $(BSD_OBJ) $(LUA_OBJ) $(ZIP_OBJ) $(FMODSDL_OBJ) $(KIT_OBJ) $(OBJ)
+	$(CXX) $(LDFLAGS) -o $@ $(OBJ) $(LUA_OBJ) $(ZIP_OBJ) $(FMODSDL_OBJ) $(KIT_OBJ) $(BSD_OBJ) $(LIBS)
+
+build/${ARCH}/%.cpp.o: %.cpp
+	@mkdir -p $(@D)
+	$(CXX) $(CXXFLAGS) $(BSD_FLAGS) $(MD_FLAGS) -c $< -o $@
+
+# The libc_table.cpp symbol table depends on the generated headers
+%/libc_table.cpp: ${LIBC_TABS};
+
+# The generated headers depend on the libc sources
+${LIBC_TABS} &: ${LIBC_SRCS} thunks/libc/symtab thunks/libc/symtab_exclude thunks/libc/c_prototypes.h thunks/libc/common.hpp
+	@mkdir -p $(@D)
+	python3 scripts/generate_libc.py ${ARCH} ${GENERATE}
+
+# Include all build dependencies too
+-include $(OBJ:%.o=%.d)
