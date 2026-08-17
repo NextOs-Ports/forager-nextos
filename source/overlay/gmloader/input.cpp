@@ -13,6 +13,14 @@
 #include "libyoyo.h"
 #include "configuration.h"
 
+/* [NextOS/forager] Chord SELECT+START por evdev cru cujos codigos fisicos vem
+ * do bind SDL do pad (nxinput_evdev_chord.h). Le BTN_SELECT/START literais
+ * fechava o jogo com L2+R2 em pads cujo driver publica esses codigos para os
+ * gatilhos (familia H700). */
+#define NXINPUT_EVDEV_CHORD_LOG(...) printf(__VA_ARGS__)
+#define NXINPUT_EVDEV_CHORD_IMPLEMENTATION
+#include "vendor/nxinput_evdev_chord.h"
+
 int app_in_focus = 0;
 int mouse_has_warped = 0;
 
@@ -203,60 +211,25 @@ void patch_input(so_module *mod)
  * pad, inclusive quando o gamecontrollerdb erra a posicao do botao. Codigos aceitos
  * (regra #29): SELECT = BTN_SELECT/TRIGGER_HAPPY1/BTN_BASE3; START = BTN_START/
  * TRIGGER_HAPPY2/BTN_BASE4. Os dois segurados juntos = encerrar. */
-static int nxquit_fds[16];
-static int nxquit_nfds = -1;
-static int nxquit_sel = 0, nxquit_start = 0;
+static int g_chord_bound = 0;
 
-static void nxquit_init(void)
+/* Liga os codigos fisicos SELECT/START ao bind SDL do primeiro pad aberto. */
+static void nxquit_bind(void)
 {
-    nxquit_nfds = 0;
-    for (int i = 0; i < 32 && nxquit_nfds < (int)(sizeof(nxquit_fds) / sizeof(int)); i++) {
-        char path[32];
-        snprintf(path, sizeof(path), "/dev/input/event%d", i);
-        int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
-        if (fd < 0)
-            continue;
-        unsigned long evbits = 0;
-        unsigned long keyb[(KEY_MAX / (8 * sizeof(long))) + 1] = {};
-        if (ioctl(fd, EVIOCGBIT(0, sizeof(evbits)), &evbits) < 0 ||
-            !(evbits & (1 << EV_KEY)) ||
-            ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(keyb)), keyb) < 0) {
-            close(fd);
-            continue;
-        }
-        #define NXQ_BIT(b) (!!(keyb[(b) / (8 * sizeof(long))] >> ((b) % (8 * sizeof(long))) & 1))
-        int has_sel = NXQ_BIT(BTN_SELECT) || NXQ_BIT(BTN_TRIGGER_HAPPY1) || NXQ_BIT(BTN_BASE3);
-        int has_start = NXQ_BIT(BTN_START) || NXQ_BIT(BTN_TRIGGER_HAPPY2) || NXQ_BIT(BTN_BASE4);
-        #undef NXQ_BIT
-        if (has_sel && has_start) {
-            nxquit_fds[nxquit_nfds++] = fd;
-            printf("[nxquit] vigiando %s (SELECT+START)\n", path);
-        } else {
-            close(fd);
-        }
+    for (int i = 0; i < ARRAY_SIZE(sdl_controllers); i++) {
+        SDL_GameController *c = sdl_controllers[i].controller;
+        if (c) { nx_evdev_chord_bind_sdl(c); g_chord_bound = 1; return; }
     }
+    g_chord_bound = 0;
 }
 
 /* devolve 1 quando o chord disparou */
 static int nxquit_poll(void)
 {
-    if (nxquit_nfds < 0)
-        nxquit_init();
-    struct input_event ev;
-    for (int i = 0; i < nxquit_nfds; i++) {
-        while (read(nxquit_fds[i], &ev, sizeof(ev)) == (ssize_t)sizeof(ev)) {
-            if (ev.type != EV_KEY)
-                continue;
-            int down = ev.value != 0;
-            switch (ev.code) {
-            case BTN_SELECT: case BTN_TRIGGER_HAPPY1: case BTN_BASE3:
-                nxquit_sel = down; break;
-            case BTN_START: case BTN_TRIGGER_HAPPY2: case BTN_BASE4:
-                nxquit_start = down; break;
-            }
-        }
-    }
-    return nxquit_sel && nxquit_start;
+    static int inited = 0;
+    if (!inited) { nx_evdev_chord_open(); inited = 1; }
+    if (!g_chord_bound) nxquit_bind();
+    return nx_evdev_chord_poll();
 }
 
 static Uint32 prev_mouse_state = 0;
@@ -314,6 +287,7 @@ int update_inputs(SDL_Window *win)
                 controller->slot = get_free_yoyogamepad_slot();
                 if (controller->slot >= 0) {
                     yoyo_gamepads[controller->slot].is_available = 1;
+                    g_chord_bound = 0; /* rebind the exit chord to this pad */
                     warning("Controller '%s' assigned to player %d.\n",
                         SDL_GameControllerName(controller->controller), controller->slot);
                 } else {
@@ -364,6 +338,7 @@ int update_inputs(SDL_Window *win)
             controller->controller = NULL;
             controller->which = -1;
             controller->slot = -1;
+            g_chord_bound = 0; /* pad gone: rebind on next poll */
             break;
         }
         case SDL_KEYDOWN:
