@@ -27,3 +27,6 @@ __pycache__/
 # The audited loader and NXExtract UI are intentional release inputs.
 !/forager-nextos
 !/nxextract/nxextract-ui
+/.build/
+/tmpbuild/
+/dist/
