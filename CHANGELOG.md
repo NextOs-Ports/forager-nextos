@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.0.4 — 2026-08-18
+
+### Corrigido — saída SELECT+START definitiva (chord canônico do framework)
+- Adota o módulo **canônico** do framework (`nxinput_evdev_chord.h` v2, nxinput
+  0.4.0), acabando com as regressões de saída entre CFWs:
+  - **SDL é a autoridade** quando há pad aberto: o chord é
+    `SDL_GameControllerGetButton(BACK) && (START)` por **estado**, mais o botão
+    **cru** do joystick nos índices que o próprio mapping declara para back/start
+    (cobre controle virtual do muOS). Dispara em ~50 ms, **sem hold longo**.
+  - **evdev cru só como fallback** quando não há pad SDL.
+  - **Nunca** vigia `BTN_SELECT/START` literais com pad aberto (na família H700
+    esses códigos são L2/R2 → não há mais "L2+R2 sai").
+- **Causa-raiz das regressões 1.0.1→1.0.3:** o header antigo derivava o código
+  evdev do índice SDL usando a enumeração da SDL vanilla, mas os CFWs Batocera-like
+  (Knulli/muOS) aplicam o patch `sdl2_input_as_retroarch_udev` que enumera
+  `0..KEY_MAX` crescente. Mesmo device, mesmo mapping, tabela índice→código
+  diferente: SELECT+START virava L3+L2 e "não saía". O caminho por estado do SDL
+  não depende dessa tabela.
+- **Diagnóstico de controle** completo no log (nome, GUID, mapping, binds, ids e
+  lista de códigos evdev de cada pad, mais as duas tabelas índice→código), para
+  achar bug de saída/controle sem o device.
+- Saída limpa (status 0) reconfirmada no R36S (GO-Super) lançando pelo
+  EmulationStation.
+
 ## 1.0.2 — 2026-08-18
 
 ### Corrigido / robustez de saída (relato: RG40XX-H / muOS não fechava)

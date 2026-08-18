@@ -13,11 +13,14 @@
 #include "libyoyo.h"
 #include "configuration.h"
 
-/* [NextOS/forager] Chord SELECT+START por evdev cru cujos codigos fisicos vem
- * do bind SDL do pad (nxinput_evdev_chord.h). Le BTN_SELECT/START literais
- * fechava o jogo com L2+R2 em pads cujo driver publica esses codigos para os
- * gatilhos (familia H700). */
-#define NXINPUT_EVDEV_CHORD_LOG(...) printf(__VA_ARGS__)
+/* [NextOS/forager] Chord de saida SELECT+START canonico do framework
+ * (nxinput_evdev_chord.h v2): SDL BACK+START por ESTADO em todo pad aberto (+ botao
+ * cru do joystick nos indices do mapping), sem hold longo; evdev cru so' como
+ * fallback quando NAO ha pad SDL. Historico: v1.0.0 lia BTN_SELECT/START literais
+ * (na familia H700 sao L2/R2 -> "L2+R2 sai"); v1.0.1/1.0.3 derivavam o codigo evdev
+ * do indice SDL com a tabela da SDL vanilla, mas os CFWs Batocera-like enumeram
+ * 0..KEY_MAX crescente -> o chord virou L3+L2 e "SELECT+START nao sai". */
+#define NXINPUT_EVDEV_CHORD_LOG(...) do { fprintf(stderr, __VA_ARGS__); fflush(stderr); } while (0)
 #define NXINPUT_EVDEV_CHORD_IMPLEMENTATION
 #include "vendor/nxinput_evdev_chord.h"
 
@@ -206,30 +209,16 @@ void patch_input(so_module *mod)
     hook_symbol(mod, "_Z13IO_Start_Stepv", (uintptr_t)&IO_Start_Step_hook, 1);
 }
 
-/* [NextOS/forager] Saida SELECT+START pelo EVDEV CRU — igual aos ports finalizados
- * (nxinput do framework): nao depende do mapping da SDL, entao funciona em QUALQUER
- * pad, inclusive quando o gamecontrollerdb erra a posicao do botao. Codigos aceitos
- * (regra #29): SELECT = BTN_SELECT/TRIGGER_HAPPY1/BTN_BASE3; START = BTN_START/
- * TRIGGER_HAPPY2/BTN_BASE4. Os dois segurados juntos = encerrar. */
-static int g_chord_bound = 0;
-
-/* Liga os codigos fisicos SELECT/START ao bind SDL do primeiro pad aberto. */
-static void nxquit_bind(void)
-{
-    for (int i = 0; i < ARRAY_SIZE(sdl_controllers); i++) {
-        SDL_GameController *c = sdl_controllers[i].controller;
-        if (c) { nx_evdev_chord_bind_sdl(c); g_chord_bound = 1; return; }
-    }
-    g_chord_bound = 0;
-}
-
-/* devolve 1 quando o chord disparou */
-static int nxquit_poll(void)
+/* [NextOS/forager] Saida SELECT+START (canonico do framework). Devolve 1 no
+ * frame em que o chord dispara. */
+static int nxquit_update(void)
 {
     static int inited = 0;
+    SDL_GameController *pads[ARRAY_SIZE(sdl_controllers)];
     if (!inited) { nx_evdev_chord_open(); inited = 1; }
-    if (!g_chord_bound) nxquit_bind();
-    return nx_evdev_chord_poll();
+    for (int i = 0; i < ARRAY_SIZE(sdl_controllers); i++)
+        pads[i] = sdl_controllers[i].controller;
+    return nx_exit_chord_update(pads, ARRAY_SIZE(sdl_controllers));
 }
 
 static Uint32 prev_mouse_state = 0;
@@ -287,7 +276,6 @@ int update_inputs(SDL_Window *win)
                 controller->slot = get_free_yoyogamepad_slot();
                 if (controller->slot >= 0) {
                     yoyo_gamepads[controller->slot].is_available = 1;
-                    g_chord_bound = 0; /* rebind the exit chord to this pad */
                     warning("Controller '%s' assigned to player %d.\n",
                         SDL_GameControllerName(controller->controller), controller->slot);
                 } else {
@@ -317,6 +305,9 @@ int update_inputs(SDL_Window *win)
                             SDL_GameControllerGetStringForButton(essentials[bi]),
                             bind.bindType, bind.value.button);
                     }
+                    /* Recibo completo do framework: mapping, binds, evdev keybits e
+                     * as duas tabelas indice->codigo (diagnostico sem device). */
+                    nx_exit_chord_log_controller(ptr, 1);
                 }
             }
             break;
@@ -338,7 +329,6 @@ int update_inputs(SDL_Window *win)
             controller->controller = NULL;
             controller->which = -1;
             controller->slot = -1;
-            g_chord_bound = 0; /* pad gone: rebind on next poll */
             break;
         }
         case SDL_KEYDOWN:
@@ -357,52 +347,10 @@ int update_inputs(SDL_Window *win)
     // Synchronize gamepad<->yoyogamepad states
     SDL_GameControllerUpdate();
 
-    /* [NextOS/forager] Chord de saida SELECT+START segurados ~1s, em QUALQUER controle
-     * (regra #29/#30: sair do port sem teclado e sem capturar botao). Sai pelo MESMO
-     * caminho do SDL_QUIT (return 0 -> main quebra o laco e desmonta), entao vale para
-     * qualquer pad que o SDL enxerga, fisico ou virtual. */
-    {
-        static int chord_frames = 0;
-        int chord_now = 0;
-        for (int i = 0; i < ARRAY_SIZE(sdl_controllers); i++) {
-            SDL_GameController *c = sdl_controllers[i].controller;
-            if (!c)
-                continue;
-            int back = SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_BACK);
-            int start = SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_START);
-            /* [NextOS/forager] Fallback muOS/gptokeyb: em alguns CFWs o controle
-             * é virtual ("muOS-Keys") e a camada de GameController não propaga
-             * BACK/START. Lê também os botões CRUS do joystick nos MESMOS índices
-             * que o mapping diz serem back/start — sem depender do dispatch do
-             * controller. */
-            if (!(back && start)) {
-                SDL_Joystick *j = SDL_GameControllerGetJoystick(c);
-                SDL_GameControllerButtonBind bb = SDL_GameControllerGetBindForButton(
-                    c, SDL_CONTROLLER_BUTTON_BACK);
-                SDL_GameControllerButtonBind sb = SDL_GameControllerGetBindForButton(
-                    c, SDL_CONTROLLER_BUTTON_START);
-                if (j && bb.bindType == SDL_CONTROLLER_BINDTYPE_BUTTON &&
-                    sb.bindType == SDL_CONTROLLER_BINDTYPE_BUTTON &&
-                    SDL_JoystickGetButton(j, bb.value.button) &&
-                    SDL_JoystickGetButton(j, sb.value.button)) {
-                    back = start = 1;
-                }
-            }
-            if (back && start) {
-                chord_now = 1;
-                break;
-            }
-        }
-        chord_frames = chord_now ? chord_frames + 1 : 0;
-        if (chord_frames >= 45) { /* ~0.75s */
-            warning("SELECT+START segurados: encerrando o port.\n");
-            return 0;
-        }
-    }
-
-    /* Caminho universal (evdev cru, independente do mapping SDL) */
-    if (nxquit_poll()) {
-        warning("SELECT+START (evdev): encerrando o port.\n");
+    /* [NextOS/forager] Chord de saida SELECT+START (canonico do framework): sai
+     * pelo MESMO caminho do SDL_QUIT (return 0 -> main quebra o laco e desmonta). */
+    if (nxquit_update()) {
+        warning("SELECT+START: encerrando o port.\n");
         return 0;
     }
     for (int i = 0; i < ARRAY_SIZE(sdl_controllers); i++) {

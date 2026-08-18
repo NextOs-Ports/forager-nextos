@@ -88,7 +88,7 @@
         "librt.so.1"
       ],
       "provenance": "port build script; framework pinned by FRAMEWORK-PIN.json",
-      "sha256": "bc10b20dc1a2014d08b6230f5ae0f73684dc92d3bf458042e758919ac264a634",
+      "sha256": "8acac8d0373153ef1e1d284528006b27c917937522e7765fee1ec0277e34fc5d",
       "soname": null,
       "source": "forager-nextos",
       "target": "nxforager/forager-nextos"
@@ -153,7 +153,7 @@
     {
       "kind": "payload",
       "mode": "0644",
-      "sha256": "f5e5c9534532840fcd45bb002e69ed85c61dba2753450e26b448b7df1481e24d",
+      "sha256": "d1b77b88f4b9f675a900e4143ac768a21218623cfe1703ca43162388c3271bd6",
       "source": "version.txt",
       "target": "nxforager/version.txt"
     },
@@ -304,7 +304,7 @@
     },
     "port_dir": "nxforager",
     "profile": "universal-portmaster",
-    "version": "1.0.3"
+    "version": "1.0.4"
   },
   "portmaster_metadata": {
     "gameinfo_xml": {
