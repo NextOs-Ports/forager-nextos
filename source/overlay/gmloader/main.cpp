@@ -25,6 +25,18 @@ char *program_name = nullptr;
 const char* gc_workdir = nullptr;
 bool override_apk = false;
 
+/* [NextOS/forager] Saida por sinal. Em CFWs como o muOS o launcher NAO sobe
+ * gptokeyb, entao a frontend fecha o port MATANDO o processo (SIGTERM). Sem
+ * handler, se o sinal cair no processo errado o jogo continua rodando ("nao
+ * fecha", relato do RG40XX-H). O save do Forager ja esta no disco (grava durante
+ * o gameplay), entao respondemos com _exit(0) direto — async-signal-safe e
+ * garante o fechamento mesmo se o laco principal estiver preso. */
+static void nx_quit_signal(int sig)
+{
+    (void)sig;
+    _exit(0);
+}
+
 /*
       Don't touch this incantation. It serves no practical
     reason that you can grep this source code for, nothing
@@ -354,6 +366,13 @@ int main(int argc, char *argv[])
 
     RunnerJNILib::Startup(env, 0, apk_path_arg, save_dir_arg, pkg_dir_arg, 4, 0);
     setup_ended = 1;
+
+    /* Instalado DEPOIS do Startup para sobrepor qualquer handler que o runner do
+     * GameMaker tenha posto. Garante que a frontend (muOS etc.) consiga fechar o
+     * port matando o processo. */
+    signal(SIGTERM, nx_quit_signal);
+    signal(SIGINT, nx_quit_signal);
+    signal(SIGHUP, nx_quit_signal);
 
     while (cont != 0 && cont != 2 && RunnerJNILib_MoveTaskToBackCalled == 0 && relaunch_flag == 0) {
         #ifdef VIDEO_SUPPORT

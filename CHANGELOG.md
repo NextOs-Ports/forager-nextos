@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.0.2 — 2026-08-18
+
+### Corrigido / robustez de saída (relato: RG40XX-H / muOS não fechava)
+- **Saída SELECT+START mais robusta em controles virtuais (muOS/gptokeyb).** Além
+  do caminho por `GameController`, o chord agora lê também os **botões crus do
+  joystick** nos mesmos índices que o mapping diz serem back/start — cobre CFWs em
+  que a camada de GameController do controle virtual ("muOS-Keys") não propaga
+  BACK/START. Tempo de hold reduzido para ~0,75 s.
+- **Chord por evdev passa a vigiar DOIS combos em paralelo** — o derivado do bind
+  SDL **e** o literal (`BTN_SELECT/BTN_START`/TRIGGER_HAPPY) — excluindo os códigos
+  de L2/R2 do device (via bind de trigger) para nunca reintroduzir o "L2+R2 sai".
+- **Handler de sinal (SIGTERM/SIGINT/SIGHUP) no binário:** se a frontend fechar o
+  port matando o processo, ele encerra limpo com `_exit(0)` (o save já está no
+  disco), mesmo que o laço principal esteja preso.
+
 ## 1.0.1 — 2026-08-17
 
 ### Corrigido

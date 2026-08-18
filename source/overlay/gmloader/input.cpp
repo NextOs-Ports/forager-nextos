@@ -366,14 +366,35 @@ int update_inputs(SDL_Window *win)
         int chord_now = 0;
         for (int i = 0; i < ARRAY_SIZE(sdl_controllers); i++) {
             SDL_GameController *c = sdl_controllers[i].controller;
-            if (c && SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_BACK) &&
-                SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_START)) {
+            if (!c)
+                continue;
+            int back = SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_BACK);
+            int start = SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_START);
+            /* [NextOS/forager] Fallback muOS/gptokeyb: em alguns CFWs o controle
+             * é virtual ("muOS-Keys") e a camada de GameController não propaga
+             * BACK/START. Lê também os botões CRUS do joystick nos MESMOS índices
+             * que o mapping diz serem back/start — sem depender do dispatch do
+             * controller. */
+            if (!(back && start)) {
+                SDL_Joystick *j = SDL_GameControllerGetJoystick(c);
+                SDL_GameControllerButtonBind bb = SDL_GameControllerGetBindForButton(
+                    c, SDL_CONTROLLER_BUTTON_BACK);
+                SDL_GameControllerButtonBind sb = SDL_GameControllerGetBindForButton(
+                    c, SDL_CONTROLLER_BUTTON_START);
+                if (j && bb.bindType == SDL_CONTROLLER_BINDTYPE_BUTTON &&
+                    sb.bindType == SDL_CONTROLLER_BINDTYPE_BUTTON &&
+                    SDL_JoystickGetButton(j, bb.value.button) &&
+                    SDL_JoystickGetButton(j, sb.value.button)) {
+                    back = start = 1;
+                }
+            }
+            if (back && start) {
                 chord_now = 1;
                 break;
             }
         }
         chord_frames = chord_now ? chord_frames + 1 : 0;
-        if (chord_frames >= 60) {
+        if (chord_frames >= 45) { /* ~0.75s */
             warning("SELECT+START segurados: encerrando o port.\n");
             return 0;
         }
