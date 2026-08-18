@@ -94,17 +94,11 @@ void nx_evdev_chord_close(void);
 typedef struct {
   int fd;
   int node;
-  int code_select;       /* combo primario (derivado do bind SDL, se houver) */
+  int code_select;
   int code_start;
-  int code_select_raw;   /* combo secundario (literal BTN_SELECT/START/...) */
-  int code_start_raw;
-  int code_l2;           /* codigos de L2/R2 do device (para NUNCA entrarem no chord) */
-  int code_r2;
   const char *source; /* "sdl-mapping" | "raw-trigger-happy" | ... */
   unsigned char down_select;
   unsigned char down_start;
-  unsigned char down_select_raw;
-  unsigned char down_start_raw;
   unsigned long keybits[NX_EVC_NLONGS];
   char name[80];
 } nx_evc_pad;
@@ -164,14 +158,6 @@ static void nx_evc_apply_raw_fallback(nx_evc_pad *pad) {
     pad->code_start = -1;
     pad->source = "none";
   }
-  /* Guarda o combo literal separado, para vigiar SEMPRE em paralelo ao combo
-   * derivado do SDL (o bind_sdl sobrescreve so o primario). code_l2/code_r2
-   * comecam invalidos; bind_sdl os preenche a partir do bind de lefttrigger/
-   * righttrigger para excluir L2/R2 do combo literal (evita o bug "L2+R2 sai"). */
-  pad->code_select_raw = pad->code_select;
-  pad->code_start_raw = pad->code_start;
-  pad->code_l2 = -1;
-  pad->code_r2 = -1;
 }
 
 static int nx_evc_is_gamepad(const unsigned long *bits) {
@@ -229,37 +215,6 @@ void nx_evdev_chord_bind_sdl(struct _SDL_GameController *controller) {
                                             SDL_CONTROLLER_BUTTON_BACK);
   start = SDL_GameControllerGetBindForButton(controller,
                                              SDL_CONTROLLER_BUTTON_START);
-  /* Binds de L2/R2: se forem por BOTAO, seus codigos evdev sao excluidos do
-   * combo literal, para "L2+R2" nunca virar SELECT+START (bug do Knulli, onde
-   * L2/R2 emitem BTN_SELECT/BTN_START literais). */
-  {
-    SDL_GameControllerButtonBind lt = SDL_GameControllerGetBindForAxis(
-        controller, SDL_CONTROLLER_AXIS_TRIGGERLEFT);
-    SDL_GameControllerButtonBind rt = SDL_GameControllerGetBindForAxis(
-        controller, SDL_CONTROLLER_AXIS_TRIGGERRIGHT);
-    for (i = 0; i < g_nx_evc_count; ++i) {
-      nx_evc_pad *pad = &g_nx_evc_pads[i];
-      pad->code_l2 = (lt.bindType == SDL_CONTROLLER_BINDTYPE_BUTTON)
-                         ? nx_evc_code_for_sdl_index(pad->keybits, lt.value.button)
-                         : -1;
-      pad->code_r2 = (rt.bindType == SDL_CONTROLLER_BINDTYPE_BUTTON)
-                         ? nx_evc_code_for_sdl_index(pad->keybits, rt.value.button)
-                         : -1;
-      /* Tira L2/R2 do combo literal, se colidirem. */
-      if (pad->code_select_raw == pad->code_l2 ||
-          pad->code_select_raw == pad->code_r2 ||
-          pad->code_start_raw == pad->code_l2 ||
-          pad->code_start_raw == pad->code_r2) {
-        NXINPUT_EVDEV_CHORD_LOG(
-            "EXIT chord evdev: event%d (%s) literal combo select=0x%x start=0x%x "
-            "colide com L2/R2 (0x%x/0x%x); desativando literal\n",
-            pad->node, pad->name, pad->code_select_raw, pad->code_start_raw,
-            pad->code_l2, pad->code_r2);
-        pad->code_select_raw = -1;
-        pad->code_start_raw = -1;
-      }
-    }
-  }
   if (back.bindType != SDL_CONTROLLER_BINDTYPE_BUTTON ||
       start.bindType != SDL_CONTROLLER_BINDTYPE_BUTTON) {
     NXINPUT_EVDEV_CHORD_LOG("EXIT chord evdev: SDL mapping has no button bind "
@@ -286,10 +241,9 @@ void nx_evdev_chord_bind_sdl(struct _SDL_GameController *controller) {
       pad->down_start = 0;
       NXINPUT_EVDEV_CHORD_LOG("EXIT chord evdev: event%d (%s) select=0x%x "
                               "start=0x%x source=sdl-mapping (back=b%d "
-                              "start=b%d) | literal tambem: 0x%x+0x%x\n",
+                              "start=b%d)\n",
                               pad->node, pad->name, sel, sta,
-                              back.value.button, start.value.button,
-                              pad->code_select_raw, pad->code_start_raw);
+                              back.value.button, start.value.button);
     }
   }
 }
@@ -307,19 +261,12 @@ int nx_evdev_chord_poll(void) {
       if (ev.type != EV_KEY)
         continue;
       down = ev.value != 0; /* 1 press, 2 autorepeat */
-      /* `if` separados (nao else-if): o mesmo codigo pode servir a mais de um
-       * combo, e vigiamos o combo derivado do SDL E o literal em paralelo. */
-      if (pad->code_select >= 0 && (int)ev.code == pad->code_select)
+      if ((int)ev.code == pad->code_select)
         pad->down_select = down;
-      if (pad->code_start >= 0 && (int)ev.code == pad->code_start)
+      else if ((int)ev.code == pad->code_start)
         pad->down_start = down;
-      if (pad->code_select_raw >= 0 && (int)ev.code == pad->code_select_raw)
-        pad->down_select_raw = down;
-      if (pad->code_start_raw >= 0 && (int)ev.code == pad->code_start_raw)
-        pad->down_start_raw = down;
     }
-    if ((pad->down_select && pad->down_start) ||
-        (pad->down_select_raw && pad->down_start_raw))
+    if (pad->down_select && pad->down_start)
       any_down = 1;
   }
   if (any_down && !g_nx_evc_fired) {
