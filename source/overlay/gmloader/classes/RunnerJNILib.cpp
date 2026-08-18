@@ -90,6 +90,146 @@ void RunnerJNILib::EnumerateGamepadDevices(JNIEnv *env, jclass clz)
 {
 }
 
+/* [NextOS/forager] Confirmação assíncrona de diálogo. O jogo chama
+ * ShowQuestionAsync("Deseja mesmo apagar este jogo salvo?", id) e fica esperando
+ * o evento async de dialog. Como o método faltava, a confirmação nunca respondia
+ * e o slot travava (o A parava de funcionar). Respondemos o evento
+ * ev_async_dialog (63) com {"id", "status"}: "sim" (1) para a pergunta de apagar
+ * e "não" (0) para qualquer outra, sempre disparando o evento para o jogo não
+ * ficar preso. */
+static int forager_msg_is_delete(const char *m)
+{
+    if (!m) return 0;
+    static const char *kw[] = {"delet","apag","erase","excluir","borrar","salvo","save slot","saved game"};
+    for (size_t k = 0; k < sizeof(kw)/sizeof(kw[0]); k++) {
+        size_t n = strlen(kw[k]);
+        for (const char *p = m; *p; p++) {
+            size_t i = 0;
+            for (; p[i] && i < n; i++) {
+                char a = p[i], b = kw[k][i];
+                if (a >= 'A' && a <= 'Z') a += 32;
+                if (b >= 'A' && b <= 'Z') b += 32;
+                if (a != b) break;
+            }
+            if (i == n) return 1;
+        }
+    }
+    return 0;
+}
+
+/* Via correta de responder o diálogo (ver libyoyo.cpp). Extern local porque
+ * libyoyo.h vem do submódulo gmloader-next e não está no overlay. */
+extern ABI_ATTR void (*InputQuerySetResult)(int, int, const char*);
+
+static void forager_fire_dialog(int dialogId, int status);
+
+/* [NextOS/forager] Fila de respostas de diálogo ADIADAS. Não podemos chamar
+ * InputQuery::SetResult de dentro do ShowQuestionAsync porque este roda dentro
+ * do Kick() do runner (iterando a lista de diálogos) — responder ali faz o Kick
+ * liberar o nó no meio da iteração (use-after-free → crash). Então enfileiramos
+ * e o main loop chama forager_flush_pending_dialog() ANTES do Process de cada
+ * frame (fora do Kick), que é como o Android real entrega a resposta. */
+#define FORAGER_DLG_QUEUE 16
+static volatile int forager_dlg_ids[FORAGER_DLG_QUEUE];
+static volatile int forager_dlg_ans[FORAGER_DLG_QUEUE];
+static volatile int forager_dlg_head = 0;
+static volatile int forager_dlg_tail = 0;
+
+static void forager_enqueue_dialog(int dialogId, int answer)
+{
+    int nt = (forager_dlg_tail + 1) % FORAGER_DLG_QUEUE;
+    if (nt == forager_dlg_head) {
+        warning("[forager-dialog] fila cheia, resposta id=%d perdida\n", dialogId);
+        return;
+    }
+    forager_dlg_ids[forager_dlg_tail] = dialogId;
+    forager_dlg_ans[forager_dlg_tail] = answer;
+    forager_dlg_tail = nt;
+}
+
+extern "C" void forager_flush_pending_dialog(void)
+{
+    while (forager_dlg_head != forager_dlg_tail) {
+        int id = forager_dlg_ids[forager_dlg_head];
+        int ans = forager_dlg_ans[forager_dlg_head];
+        forager_dlg_head = (forager_dlg_head + 1) % FORAGER_DLG_QUEUE;
+        if (InputQuerySetResult) {
+            /* A string tem que ser alocada no HEAP (libc do host, igual ao strdup
+             * do AddQuestionDialog): o runner assume posse e faz free() nela depois.
+             * Passar um literal "" fazia free() em .rodata → corrupção de heap. */
+            char *empty = strdup("");
+            warning("[forager-dialog] flush SetResult(id=%d, ans=%d)\n", id, ans);
+            InputQuerySetResult(id, ans, empty ? empty : "");
+        } else {
+            forager_fire_dialog(id, ans);
+        }
+    }
+}
+
+static void forager_fire_dialog(int dialogId, int status)
+{
+    /* Usamos SÓ dsMapAddInt: o dsMapAddDouble não é resolvido neste runner
+     * (fica NULL) e exigir ele deixava o evento sem disparar ("async primitives
+     * unavailable"), travando a confirmação de apagar. "id" e "status" como int
+     * são lidos igual pelo handler de Async-Dialog do jogo. */
+    if (!CreateDsMap || !dsMapAddInt || !CreateAsynEventWithDSMap) {
+        warning("forager dialog: async primitives unavailable\n");
+        return;
+    }
+    int m = CreateDsMap(0);
+    dsMapAddInt(m, "id", dialogId);
+    dsMapAddInt(m, "status", status);
+    CreateAsynEventWithDSMap(m, 63); /* ev_async_dialog */
+}
+
+void RunnerJNILib::ShowQuestionAsync(JNIEnv *env, jclass clz, jstring message, jint dialogId)
+{
+    const char *msg = message ? ((String *)message)->str : "";
+    /* Confirmação de apagar save: só se chega aqui de propósito, então "sim" (1).
+     * Enfileira — o SetResult real é feito fora do Kick (ver fila acima). */
+    int status = 1;
+    warning("[forager-dialog] ShowQuestionAsync id=%d '%s' -> enfileira(%d)\n",
+            (int)dialogId, msg, status);
+    forager_enqueue_dialog((int)dialogId, status);
+}
+
+void RunnerJNILib::ShowMessageAsync(JNIEnv *env, jclass clz, jstring message, jint dialogId)
+{
+    const char *msg = message ? ((String *)message)->str : "";
+    warning("[forager-dialog] ShowMessageAsync id=%d '%s' -> enfileira(1)\n",
+            (int)dialogId, msg);
+    forager_enqueue_dialog((int)dialogId, 1);
+}
+
+/* [NextOS/forager] O Forager na verdade usa a versão SÍNCRONA
+ * ShowQuestion(String)->int (o show_question() bloqueante do GameMaker), que
+ * devolve 1 (sim) ou 0 (não) na hora. Sem o método, a confirmação de "apagar
+ * save" recebia lixo e o slot travava. Respondemos "sim" (1) para a pergunta de
+ * apagar e "não" (0) para as demais, para não confirmar nada destrutivo por
+ * engano. */
+jint RunnerJNILib::ShowQuestion(JNIEnv *env, jclass clz, jstring message)
+{
+    const char *msg = message ? ((String *)message)->str : "";
+    /* No Forager, show_question() é a confirmação de "apagar este save?", à qual
+     * só se chega segurando o botão de apagar de propósito. A resposta correta é
+     * "sim" (1). Respondemos sim para qualquer pergunta (o jogo praticamente só
+     * usa esta) para o apagar funcionar em qualquer idioma, sem depender de casar
+     * o texto. Logamos a mensagem para auditoria. */
+    int is_del = forager_msg_is_delete(msg);
+    warning("[forager-dialog] ShowQuestion '%s' (delete-match=%d) -> 1\n", msg, is_del);
+    return 1;
+}
+
+/* [NextOS/forager] show_message() síncrono (sem id): só precisa mostrar e
+ * retornar para o jogo seguir. Não temos caixa de diálogo nativa, então
+ * logamos e voltamos — evita travar depois do apagar quando o jogo avisa
+ * "save apagado". */
+void RunnerJNILib::ShowMessage(JNIEnv *env, jclass clz, jstring message)
+{
+    const char *msg = message ? ((String *)message)->str : "";
+    warning("[forager-dialog] ShowMessage '%s' (no-op)\n", msg);
+}
+
 extern int RunnerJNILib_MoveTaskToBackCalled;
 void RunnerJNILib::MoveTaskToBack(JNIEnv *env, jclass clz)
 {
@@ -255,6 +395,10 @@ const ManagedMethod RunnerJNILibManagedMethods[] = {
     REGISTER_STATIC_METHOD(RunnerJNILib, MoveTaskToBack, "()V"),
     REGISTER_STATIC_METHOD(RunnerJNILib, ClearGamepads, "()V"),
     REGISTER_STATIC_METHOD(RunnerJNILib, EnumerateGamepadDevices, "()V"),
+    REGISTER_STATIC_METHOD(RunnerJNILib, ShowQuestionAsync, "(Ljava/lang/String;I)V"),
+    REGISTER_STATIC_METHOD(RunnerJNILib, ShowMessageAsync, "(Ljava/lang/String;I)V"),
+    REGISTER_STATIC_METHOD(RunnerJNILib, ShowQuestion, "(Ljava/lang/String;)I"),
+    REGISTER_STATIC_METHOD(RunnerJNILib, ShowMessage, "(Ljava/lang/String;)V"),
     #ifdef VIDEO_SUPPORT
     REGISTER_STATIC_METHOD(RunnerJNILib, VideoOpen, "(Ljava/lang/String;)V"),
     REGISTER_STATIC_METHOD(RunnerJNILib, VideoClose, "()V"),

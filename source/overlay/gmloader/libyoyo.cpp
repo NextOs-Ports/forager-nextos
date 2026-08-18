@@ -4,6 +4,7 @@
 #include <string>
 #include <stdlib.h>
 #include <unordered_map>
+#include <sys/mman.h>
 
 #include "platform.h"
 #include "so_util.h"
@@ -15,6 +16,13 @@ ABI_ATTR create_ds_map_t CreateDsMap = NULL;
 ABI_ATTR bool (*dsMapAddDouble)(int, const char*, double) = NULL;
 ABI_ATTR bool (*dsMapAddInt)(int, const char*, int) = NULL;
 ABI_ATTR bool (*dsMapAddString)(int, const char*, const char*) = NULL;
+/* [NextOS/forager] InputQuery::SetResult(id, result, str): via CORRETA de
+ * responder um diálogo async do runner — acha o nó na lista de diálogos, grava
+ * a resposta (offset 0x28) e marca estado=7 (completo). O próprio Kick do runner
+ * então dispara o evento async e REMOVE o nó, limpando o estado. Sem isso (só
+ * disparando o evento na marra) o nó ficava pendente e o 2º show_question_async
+ * nunca rearmava. Usado pelo RunnerJNILib::ShowQuestionAsync. */
+ABI_ATTR void (*InputQuerySetResult)(int, int, const char*) = NULL;
 ABI_ATTR fct_add_t Function_Add = NULL;
 ABI_ATTR float (*Audio_GetTrackPos)(int sound_id) = NULL;
 ABI_ATTR int (*Audio_WAVs)(uint8_t*, uint32_t, uint8_t*, int) = NULL;
@@ -160,6 +168,78 @@ ABI_ATTR static void forager_select_language_hook(void *self, void *other,
         args[0] = saved;
         YYThingDerefHelper(&forced);
     }
+}
+
+static inline RValue *forager_get_instance_var(void *self, uint32_t var_id)
+{
+    if (!self) return NULL;
+    uintptr_t *self_ptrs = (uintptr_t *)self;
+    if (self_ptrs[1] != 0) {
+        return (RValue *)(self_ptrs[1] + (var_id * 16));
+    }
+    uintptr_t *vtable = (uintptr_t *)self_ptrs[0];
+    if (vtable && vtable[2]) {
+        typedef RValue *(*get_var_fn)(void *inst, uint32_t var);
+        get_var_fn get_var = (get_var_fn)vtable[2];
+        return get_var(self, var_id);
+    }
+    return NULL;
+}
+
+static ReentrantHook REHObjSaveSlotStep = {};
+typedef ABI_ATTR void (*forager_objSaveSlot_step_t)(void *self, void *other);
+static forager_objSaveSlot_step_t forager_objSaveSlot_step_original = NULL;
+
+ABI_ATTR static void forager_objSaveSlot_step_hook(void *self, void *other)
+{
+    if (self) {
+        // Check if Gamepad X (button 2), Y (button 3) or keyboard X/Delete is pressed
+        bool x_pressed = false;
+        for (int i = 0; i < MAX_GAMEPADS; i++) {
+            if (yoyo_gamepads[i].is_available) {
+                if (yoyo_gamepads[i].buttons[2] > 0.5 || yoyo_gamepads[i].buttons[3] > 0.5) {
+                    x_pressed = true;
+                    break;
+                }
+            }
+        }
+        if (_IO_KeyDown['X'] || _IO_KeyDown['x'] || _IO_KeyDown[0x7f] || _IO_KeyDown[127]) {
+            x_pressed = true;
+        }
+
+        RValue *r_delete = forager_get_instance_var(self, 0x5f4);
+        RValue *r_active = forager_get_instance_var(self, 0x732);
+
+        /* [NextOS/forager] DIAGNOSTICO 2o-delete: logar (limitado) o estado do
+         * slot toda vez que o Step roda, pra ver por que o 2o save nao apaga.
+         * Removível depois de entender. */
+        static int dbg_frames = 0;
+        static int dbg_last_logged = -1;
+        dbg_frames++;
+        double dv = r_delete ? r_delete->rvalue.val : -999.0;
+        double av = r_active ? r_active->rvalue.val : -999.0;
+        if (x_pressed || (dv > 0.01) || (dbg_frames - dbg_last_logged) >= 60) {
+            printf("[forager-dbg] slot=%p frame=%d x=%d var_5f4(del)=%.3f var_732(act)=%.3f\n",
+                   self, dbg_frames, x_pressed ? 1 : 0, dv, av);
+            dbg_last_logged = dbg_frames;
+        }
+
+        if (x_pressed && r_delete) {
+            double is_act = r_active ? r_active->rvalue.val : 1.0;
+            printf("[forager-input] Delete pressed on slot %p! active=%.2f var_5f4_before=%.2f\n",
+                   self, is_act, r_delete->rvalue.val);
+            if (is_act > 0.5 || !r_active) {
+                r_delete->rvalue.val = 1.0;
+                r_delete->kind = VALUE_REAL;
+                r_delete->flags = 0;
+                printf("[forager-input] var_5f4 forced to 1.0 for slot %p\n", self);
+            }
+        }
+    }
+
+    rehook_unhook(&REHObjSaveSlotStep);
+    forager_objSaveSlot_step_original(self, other);
+    rehook_hook(&REHObjSaveSlotStep);
 }
 
 ABI_ATTR static void forager_os_get_language(RValue *ret, void *self,
@@ -539,11 +619,33 @@ void patch_libyoyo(so_module *mod)
         rehook_hook(&REHSelectLanguage);
     }
 
+    /* [NextOS/forager] Delete instantâneo de save ao pressionar X no slot:
+     * O YYC original (objSaveSlot_Step_0) incrementava deleteTimer a 0.1/frame.
+     * Ajustamos a constante double de incremento em 0x016ec370 para 100.0,
+     * fazendo com que um toque em X preencha o timer imediatamente e abra
+     * a tela nativa de confirmação ("Deseja mesmo apagar este jogo salvo?"). */
+    const uintptr_t objSaveSlot_step = so_symbol(mod,
+        "_Z29gml_Object_objSaveSlot_Step_0P9CInstanceS0_");
+    if (objSaveSlot_step) {
+        uintptr_t lit_addr = objSaveSlot_step + 0xb88;
+        uintptr_t page_start = lit_addr & ~0xfff;
+        if (mprotect((void *)page_start, 4096, PROT_READ | PROT_WRITE | PROT_EXEC) == 0) {
+            *(double *)lit_addr = 100.0;
+            printf("[forager-input] Save slot instant delete enabled (deleteTimer rate=100.0)\n");
+        }
+        forager_objSaveSlot_step_original = (forager_objSaveSlot_step_t)objSaveSlot_step;
+        rehook_new(mod, &REHObjSaveSlotStep, objSaveSlot_step,
+                   (uintptr_t)&forager_objSaveSlot_step_hook);
+        rehook_hook(&REHObjSaveSlotStep);
+        printf("[forager-input] Save slot X button hook installed\n");
+    }
+
     // Load all of the native symbols referenced
     // ENSURE_SYMBOL(mod, Audio_GetTrackPos, "_Z17Audio_GetTrackPosi");
     ENSURE_SYMBOL(mod, Audio_PrepareGroup, "_Z18Audio_PrepareGroupi");
     // ENSURE_SYMBOL(mod, Audio_WAVs, "_Z10Audio_WAVsPhjS_i");
     ENSURE_SYMBOL(mod, CreateAsynEventWithDSMap, "_Z24CreateAsynEventWithDSMapii");
+    ENSURE_SYMBOL(mod, InputQuerySetResult, "_ZN10InputQuery9SetResultEiiPKc");
     ENSURE_SYMBOL(mod, CreateDsMap, "_Z11CreateDsMapiz", "dsMapCreate");
     ENSURE_SYMBOL(mod, dsMapAddString, "dsMapAddString");
     // ENSURE_SYMBOL(mod, dsMapAddDouble, "dsMapAddDouble");

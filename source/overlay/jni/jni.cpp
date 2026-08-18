@@ -338,7 +338,7 @@ ABI_ATTR static jmethodID iface_GetStaticMethodID(JNIEnv *env, jclass clazz, con
     }
 
     if (clz)
-        warning("Class %s does not have static method %s.\n", clz->classname, name);
+        warning("Class %s does not have static method %s SIG=%s.\n", clz->classname, name, sig ? sig : "(null)");
 
     return NULL;
 }

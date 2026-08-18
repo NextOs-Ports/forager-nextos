@@ -81,6 +81,9 @@ static fs::path get_absolute_path(const char* path, fs::path work_dir){
  * Grava RGBA cru + um .txt com a estatistica dos canais — inclusive o ALPHA, que e o
  * que separa "tela preta" de "tela desenhada mas com alpha zerado"
  * (reference_alpha_scanout_medir_no_canal_alpha). */
+/* [NextOS/forager] responde diálogos async enfileirados, fora do Kick (RunnerJNILib.cpp) */
+extern "C" void forager_flush_pending_dialog(void);
+
 static void forager_maybe_shot(int w, int h)
 {
     /* GMLOADER_SHOT_FRAME aceita LISTA ("4200,5400,6600"): prova antes/depois de um
@@ -359,6 +362,7 @@ int main(int argc, char *argv[])
         if (update_inputs(sdl_win) != 1)
             break;
         SDL_GetWindowSize(sdl_win, &w, &h);
+        forager_flush_pending_dialog(); /* [NextOS/forager] responde diálogos fora do Kick */
         cont = RunnerJNILib::Process(env, 0, w, h, 0, 0, 0, 0, 0, 60);
         if (RunnerJNILib::canFlip(env, 0)) {
             forager_maybe_shot(w, h);   /* inerte sem GMLOADER_SHOT_FRAME */

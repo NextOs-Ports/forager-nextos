@@ -32,6 +32,17 @@ public:
     static void ClearGamepads(JNIEnv *env, jclass clz);
     static void EnumerateGamepadDevices(JNIEnv *env, jclass clz);
 
+    /* [NextOS/forager] Diálogos assíncronos que o jogo pede pelo RunnerJNILib e
+     * que faltavam: sem o ShowQuestionAsync a confirmação de "apagar save" abria
+     * (invisivelmente) e travava o slot esperando a resposta. Aqui respondemos o
+     * evento async de dialog (ev_async_dialog=63): "sim" para a pergunta de
+     * apagar, "nao" para qualquer outra, e sempre disparamos o evento para o jogo
+     * nunca ficar preso. */
+    static void ShowQuestionAsync(JNIEnv *env, jclass clz, jstring message, jint dialogId);
+    static void ShowMessageAsync(JNIEnv *env, jclass clz, jstring message, jint dialogId);
+    static jint ShowQuestion(JNIEnv *env, jclass clz, jstring message);
+    static void ShowMessage(JNIEnv *env, jclass clz, jstring message);
+
     /* [NextOS/forager] extensoes Java do Forager (ForagerLicensing, BlitworksCloudSave,
      * GooglePlay*, Notch, GMLive...). Ver RunnerJNILib.cpp. */
     static jobject CallExtensionFunction(JNIEnv *env, jclass clz, jstring className,
